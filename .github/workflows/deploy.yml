@@ -24,20 +24,17 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 18
-          cache: 'npm'
+          node-version: 20   # 可用 18 或 20，均可
 
       - name: Install deps
-        run: npm install
+        run: npm install --no-fund --no-audit
 
       - name: Build
         run: npm run build
 
-      # 这一步会配置 GitHub Pages 环境（关键）
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
-      # 上传 dist 给后续部署步骤
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
