@@ -84,17 +84,56 @@ export default function SwipePlanner() {
     return () => sub.subscription?.unsubscribe?.();
   }, []);
 
-  // -------- 首次加载：如果已登录，拉取云端任务覆盖本地 --------
+  // ----------- 安全同步：若云端为空，则把本地任务上传；否则用云端覆盖本地 ----------
   async function loadFromCloud() {
-    if (!userId) return;
-    const { data, error } = await supabase
+    if (!userId) {
+      console.warn("未登录，跳过上云同步。");
+      return;
+    }
+
+    const { data: cloudData, error } = await supabase
       .from("tasks")
       .select("*")
       .eq("user_id", userId)
-      .order("updated_at", { ascending:false });
-    if (!error) setState(rowsToState(data));
+      .order("updated_at", { ascending: false });
+
+    if (error) {
+      alert("读取云端失败：" + error.message);
+      return;
+    }
+
+    const localData = loadLocal();
+    const cloud = cloudData || [];
+
+    if (cloud.length === 0) {
+      // ✅ 云端是空的（第一次登录/初始化）→ 把本地所有任务迁移到云端
+      const rows = [];
+      for (const p of localData.projects || []) {
+        for (const lane of ["today", "backlog", "done"]) {
+          for (const t of (p.lanes?.[lane] || [])) {
+            rows.push(stateTaskToRow(p.name, lane, t, userId));
+          }
+        }
+      }
+      if (rows.length > 0) {
+        const { error: upErr } = await supabase.from("tasks").upsert(rows, { onConflict: "id" });
+        if (upErr) { alert("首次上云失败：" + upErr.message); return; }
+      }
+      // 保留本地当前视图
+      setState(localData);
+    } else {
+      // ✅ 云端已有数据 → 用云端覆盖本地，并更新本地缓存
+      const next = rowsToState(cloud);
+      setState(next);
+      saveLocal(next);
+    }
   }
-  useEffect(()=>{ loadFromCloud(); /* eslint-disable-next-line */ }, [userId]);
+
+  // 页面加载或 userId 变化时自动执行一次
+  useEffect(() => {
+    loadFromCloud();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
 
   // 可选：订阅实时（需要你在 Supabase 表设置里勾选 Enable Realtime）
   useEffect(() => {
@@ -114,6 +153,7 @@ export default function SwipePlanner() {
   const go = (dir) => setState(s => ({ ...s, current: (s.current + dir + s.projects.length) % s.projects.length }));
 
   const dropTask = async (taskId, laneKey, opts) => {
+    // 先本地更新
     setState((s) => {
       const list = s.projects[current];
       const lanes = { ...list.lanes };
@@ -131,20 +171,20 @@ export default function SwipePlanner() {
       return { ...s, projects:newProjects };
     });
 
-    // 云端同步：删除 or 移动
-    if (!userId) return;
-    const pjName = project.name;
+    // 再同步云端
+    if (!userId) { alert("请先登录同步，否则下次同步会还原。"); return; }
     if (opts?.del) {
       await supabase.from("tasks").delete().eq("id", taskId).eq("user_id", userId);
     } else {
-      // 移动：更新 lane
-      await supabase.from("tasks").update({ lane: laneKey, updated_at: new Date().toISOString() }).eq("id", taskId).eq("user_id", userId);
+      await supabase.from("tasks").update({ lane: laneKey, updated_at: new Date().toISOString() })
+        .eq("id", taskId).eq("user_id", userId);
     }
   };
 
   const addTask = (lane="today") => setEditing({ projectId: project.id, lane, task:null });
 
   const saveEdit = async (payload) => {
+    // 先本地更新
     setState((s) => {
       const pIdx = s.projects.findIndex(p=>p.id===editing.projectId);
       if (pIdx===-1) return s;
@@ -159,7 +199,10 @@ export default function SwipePlanner() {
       return { ...s, projects:newProjects };
     });
 
-    if (userId) {
+    // 再写云端
+    if (!userId) {
+      alert("请先点击右上角“登录同步”，否则刷新/同步会还原。");
+    } else {
       const isEdit = !!editing.task;
       const t = isEdit ? { ...editing.task, ...payload } : { id: cryptoRandomId(), ...payload };
       const row = stateTaskToRow(project.name, editing.lane, t, userId);
